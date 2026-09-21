@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Pantry Keeper",
+    "slug": "pantry-keeper",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "pantry-keeper",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false
+    },
+    "android": {},
+    "splash": {
+      "backgroundColor": "#f7f6f1"
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": ["expo-router", "expo-camera", "expo-notifications"],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
