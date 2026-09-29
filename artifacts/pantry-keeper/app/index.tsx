@@ -1,5 +1,6 @@
 import { Feather, Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { File } from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useMemo, useRef, useState } from 'react';
@@ -18,7 +19,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors } from '@/hooks/useColors';
-import { PantryItem, PantryProvider, usePantry } from '@/state/PantryContext';
+import {
+  PantryItem,
+  PantryProvider,
+  PantrySettings,
+  usePantry,
+} from '@/state/PantryContext';
 
 type CaptureMode = 'product' | 'expiry';
 type AddStep = 'product' | 'expiry' | 'details';
@@ -31,6 +37,100 @@ type Draft = {
   expiryPhotoUri?: string;
   barcode?: string;
 };
+
+type LabelKind = 'product' | 'expiry';
+type LabelReadResult = {
+  name?: string;
+  expiryDate?: string;
+  confidence?: number;
+};
+
+function parseLabelResult(content: string): LabelReadResult {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenced?.[1] ?? content.match(/\{[\s\S]*\}/)?.[0];
+  if (!candidate) throw new Error('The AI returned no structured result.');
+  const parsed = JSON.parse(candidate) as Record<string, unknown>;
+  return {
+    name: typeof parsed.name === 'string' ? parsed.name.trim() : '',
+    expiryDate: typeof parsed.expiryDate === 'string' ? parsed.expiryDate.trim() : '',
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0,
+  };
+}
+
+function labelPrompt(kind: LabelKind) {
+  return kind === 'product'
+    ? 'Read the main food product name from this pantry label. Ignore slogans, nutrition facts, and marketing copy.'
+    : 'Read the best-before or expiry date from this pantry label. Convert it to YYYY-MM-DD. If only month and year are visible, use the last day of that month. Do not invent a date.';
+}
+
+async function readLabelPhoto(
+  uri: string,
+  kind: LabelKind,
+  settings: PantrySettings,
+): Promise<LabelReadResult> {
+  const file = new File(uri);
+  const imageData = `data:image/jpeg;base64,${await file.base64()}`;
+  const prompt = `${labelPrompt(kind)} Return only valid JSON with the keys "name", "expiryDate", and "confidence". Use an empty string when a field cannot be read.`;
+
+  if (settings.aiProvider === 'local') {
+    const configuredUrl = settings.localBaseUrl.trim().replace(/\/+$/, '');
+    if (!configuredUrl) throw new Error('Add a local AI URL in Settings first.');
+    const endpoint = configuredUrl.endsWith('/chat/completions')
+      ? configuredUrl
+      : `${configuredUrl}/chat/completions`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(settings.localApiKey.trim()
+          ? { Authorization: `Bearer ${settings.localApiKey.trim()}` }
+          : {}),
+      },
+      body: JSON.stringify({
+        model: settings.localModel.trim(),
+        max_tokens: 8192,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You read food labels. Return only valid JSON with name, expiryDate, and confidence.',
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: imageData } },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!response.ok) throw new Error('The local AI endpoint returned an error.');
+    const payload = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string | null } }>;
+    };
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') throw new Error('The local AI returned no text.');
+    return parseLabelResult(content);
+  }
+
+  const domain = process.env.EXPO_PUBLIC_DOMAIN;
+  if (!domain) throw new Error('The hosted AI endpoint is not configured.');
+  const response = await fetch(`https://${domain}/api/ai/analyze-label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      kind,
+      model: settings.openRouterModel.trim(),
+      imageData,
+    }),
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? 'OpenRouter could not read this label.');
+  }
+  return (await response.json()) as LabelReadResult;
+}
 
 function daysUntil(dateString: string) {
   const today = new Date();
@@ -340,6 +440,10 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
   const { settings, addItem } = usePantry();
   const [step, setStep] = useState<AddStep>('product');
   const [cameraMode, setCameraMode] = useState<CaptureMode | null>(null);
+  const [analysisState, setAnalysisState] = useState<
+    'idle' | 'reading' | 'read' | 'unavailable'
+  >('idle');
+  const [analysisMessage, setAnalysisMessage] = useState('');
   const [draft, setDraft] = useState<Draft>({
     name: '',
     shelf: settings.shelves[0] ?? 'Top shelf',
@@ -351,6 +455,8 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
   function reset() {
     setStep('product');
     setCameraMode(null);
+    setAnalysisState('idle');
+    setAnalysisMessage('');
     setDraft({ name: '', shelf: settings.shelves[0] ?? 'Top shelf', expiryDate: '' });
     setSaving(false);
     setDateError('');
@@ -363,6 +469,40 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
 
   function openCamera(mode: CaptureMode) {
     setCameraMode(mode);
+  }
+
+  async function analyzeCapture(uri: string, kind: LabelKind) {
+    setAnalysisState('reading');
+    setAnalysisMessage('');
+    try {
+      const result = await readLabelPhoto(uri, kind, settings);
+      if (kind === 'product' && result.name) {
+        setDraft((current) => ({ ...current, name: result.name ?? current.name }));
+      }
+      if (kind === 'expiry' && result.expiryDate) {
+        setDraft((current) => ({
+          ...current,
+          expiryDate: result.expiryDate ?? current.expiryDate,
+        }));
+      }
+      setAnalysisState('read');
+      setAnalysisMessage(
+        kind === 'product'
+          ? result.name
+            ? 'Product name suggested. You can edit it below.'
+            : 'No product name was clear enough to suggest.'
+          : result.expiryDate
+            ? 'Expiry date suggested. Please confirm it below.'
+            : 'No expiry date was clear enough to suggest.',
+      );
+    } catch (error) {
+      setAnalysisState('unavailable');
+      setAnalysisMessage(
+        error instanceof Error
+          ? `${error.message} You can still enter it manually.`
+          : 'AI reading was unavailable. You can still enter it manually.',
+      );
+    }
   }
 
   async function save() {
@@ -431,6 +571,11 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
                 onPress={() => openCamera('product')}
                 colors={colors}
               />
+              <AnalysisStatus
+                state={analysisState}
+                message={analysisMessage}
+                colors={colors}
+              />
               {draft.barcode ? (
                 <View style={[styles.detectedRow, { backgroundColor: colors.sage }]}>
                   <Ionicons name="checkmark-circle" size={18} color={colors.green} />
@@ -464,6 +609,11 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
                 mode="expiry"
                 uri={draft.expiryPhotoUri}
                 onPress={() => openCamera('expiry')}
+                colors={colors}
+              />
+              <AnalysisStatus
+                state={analysisState}
+                message={analysisMessage}
                 colors={colors}
               />
               <View style={[styles.infoBox, { backgroundColor: colors.accent }]}>
@@ -578,8 +728,10 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
                   barcode: barcode ?? current.barcode,
                   name: current.name || (barcode ? `Product ${barcode}` : ''),
                 }));
+                void analyzeCapture(uri, 'product');
               } else {
                 setDraft((current) => ({ ...current, expiryPhotoUri: uri }));
+                void analyzeCapture(uri, 'expiry');
               }
               setCameraMode(null);
             }}
@@ -612,6 +764,52 @@ function CaptureCard({
       </View>
       <Feather name="chevron-right" size={19} color={colors.mutedForeground} />
     </Pressable>
+  );
+}
+
+function AnalysisStatus({
+  state,
+  message,
+  colors,
+}: {
+  state: 'idle' | 'reading' | 'read' | 'unavailable';
+  message: string;
+  colors: ReturnType<typeof useColors>;
+}) {
+  if (state === 'idle') return null;
+  const isReading = state === 'reading';
+  const isUnavailable = state === 'unavailable';
+  return (
+    <View
+      style={[
+        styles.analysisRow,
+        {
+          backgroundColor: isUnavailable
+            ? colors.accent
+            : state === 'read'
+              ? colors.sage
+              : colors.muted,
+        },
+      ]}
+    >
+      {isReading ? (
+        <ActivityIndicator size="small" color={colors.green} />
+      ) : (
+        <Ionicons
+          name={isUnavailable ? 'information-circle-outline' : 'sparkles-outline'}
+          size={17}
+          color={isUnavailable ? colors.amber : colors.green}
+        />
+      )}
+      <Text
+        style={[
+          styles.analysisText,
+          { color: isUnavailable ? colors.accentForeground : colors.green },
+        ]}
+      >
+        {isReading ? 'Reading label…' : message}
+      </Text>
+    </View>
   );
 }
 
@@ -795,6 +993,98 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
           </Pressable>
 
           <View style={styles.settingsDivider} />
+          <Text style={[styles.modalEyebrow, { color: colors.green }]}>LABEL READING</Text>
+          <Text style={[styles.modalHeading, { color: colors.forest }]}>Choose your AI</Text>
+          <Text style={[styles.modalDescription, { color: colors.mutedForeground }]}>
+            OpenRouter is hosted and private to this project. Local AI keeps photos on your network and works with an OpenAI-compatible endpoint.
+          </Text>
+          <View style={styles.providerRow}>
+            {[
+              { key: 'openrouter' as const, label: 'OpenRouter', icon: 'cloud-outline' as const },
+              { key: 'local' as const, label: 'Local AI', icon: 'hardware-chip-outline' as const },
+            ].map((provider) => (
+              <Pressable
+                key={provider.key}
+                onPress={() => void updateSettings({ aiProvider: provider.key })}
+                style={[
+                  styles.providerChoice,
+                  {
+                    backgroundColor: settings.aiProvider === provider.key ? colors.sage : colors.card,
+                    borderColor: settings.aiProvider === provider.key ? colors.green : colors.border,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name={provider.icon}
+                  size={18}
+                  color={settings.aiProvider === provider.key ? colors.green : colors.mutedForeground}
+                />
+                <Text
+                  style={[
+                    styles.providerChoiceText,
+                    { color: settings.aiProvider === provider.key ? colors.green : colors.mutedForeground },
+                  ]}
+                >
+                  {provider.label}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          {settings.aiProvider === 'openrouter' ? (
+            <>
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>OpenRouter vision model</Text>
+              <TextInput
+                value={settings.openRouterModel}
+                onChangeText={(openRouterModel) => void updateSettings({ openRouterModel })}
+                placeholder="google/gemini-3.8-flash"
+                placeholderTextColor={colors.mutedForeground}
+                autoCapitalize="none"
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+              />
+              <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
+                The hosted default uses Google Gemini through OpenRouter, not xAI.
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>Local AI base URL</Text>
+              <TextInput
+                value={settings.localBaseUrl}
+                onChangeText={(localBaseUrl) => void updateSettings({ localBaseUrl })}
+                placeholder="http://192.168.1.20:11434/v1"
+                placeholderTextColor={colors.mutedForeground}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+              />
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>Local model</Text>
+              <TextInput
+                value={settings.localModel}
+                onChangeText={(localModel) => void updateSettings({ localModel })}
+                placeholder="llama3.2-vision"
+                placeholderTextColor={colors.mutedForeground}
+                autoCapitalize="none"
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+              />
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>Local API key (optional)</Text>
+              <TextInput
+                value={settings.localApiKey}
+                onChangeText={(localApiKey) => void updateSettings({ localApiKey })}
+                placeholder="Only needed if your local server requires one"
+                placeholderTextColor={colors.mutedForeground}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+              />
+              <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
+                On Android, use the computer’s LAN IP instead of 127.0.0.1. The phone and AI server must be reachable from the same network.
+              </Text>
+            </>
+          )}
+
+          <View style={styles.settingsDivider} />
           <Text style={[styles.modalEyebrow, { color: colors.green }]}>STORAGE</Text>
           <Text style={[styles.modalHeading, { color: colors.forest }]}>Your shelves</Text>
           <Text style={[styles.modalDescription, { color: colors.mutedForeground }]}>
@@ -951,4 +1241,10 @@ const styles = StyleSheet.create({
   addShelfRow: { flexDirection: 'row', gap: 8, marginTop: 5 },
   shelfInput: { flex: 1, minHeight: 48, borderWidth: 1, borderRadius: 14, paddingHorizontal: 13, fontSize: 13, fontFamily: 'Inter_400Regular' },
   addShelfButton: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  analysisRow: { borderRadius: 13, padding: 11, flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
+  analysisText: { flex: 1, fontSize: 11, lineHeight: 17, fontFamily: 'Inter_500Medium' },
+  providerRow: { flexDirection: 'row', gap: 8, marginBottom: 3 },
+  providerChoice: { flex: 1, minHeight: 48, borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
+  providerChoiceText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  settingsHint: { fontSize: 11, lineHeight: 17, fontFamily: 'Inter_400Regular', marginTop: 7 },
 });

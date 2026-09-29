@@ -24,6 +24,11 @@ export type PantryItem = {
 export type PantrySettings = {
   shelves: string[];
   reminderDays: number;
+  aiProvider: 'openrouter' | 'local';
+  openRouterModel: string;
+  localBaseUrl: string;
+  localModel: string;
+  localApiKey: string;
 };
 
 type ItemDraft = Omit<PantryItem, 'id' | 'addedAt'>;
@@ -43,6 +48,11 @@ const SETTINGS_KEY = '@pantry-keeper/settings';
 const DEFAULT_SETTINGS: PantrySettings = {
   shelves: ['Top shelf', 'Middle shelf', 'Bottom shelf'],
   reminderDays: 30,
+  aiProvider: 'openrouter',
+  openRouterModel: 'google/gemini-3.8-flash',
+  localBaseUrl: 'http://127.0.0.1:11434/v1',
+  localModel: 'llama3.2-vision',
+  localApiKey: '',
 };
 
 Notifications.setNotificationHandler({

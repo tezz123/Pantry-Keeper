@@ -1,0 +1,1 @@
+- [AI provider routing](ai-provider-routing.md) — keep hosted credentials server-side and call local OpenAI-compatible endpoints from the device.

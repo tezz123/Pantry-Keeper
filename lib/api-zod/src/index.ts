@@ -1,2 +1,3 @@
 export * from "./generated/api";
-export * from "./generated/types";
+export { AnalyzePantryLabelBodyKind } from "./generated/types";
+export type { ApiError, HealthStatus } from "./generated/types";

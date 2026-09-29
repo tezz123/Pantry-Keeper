@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: ai
+    description: Pantry label recognition operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /ai/analyze-label:
+    post:
+      operationId: analyzePantryLabel
+      tags: [ai]
+      summary: Read a pantry label photo with OpenRouter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzePantryLabelBody"
+      responses:
+        "200":
+          description: Extracted label fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyzePantryLabelResponse"
+        "400":
+          description: Invalid image request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: AI provider failed to read the label
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +65,36 @@ components:
           type: string
       required:
         - status
+    AnalyzePantryLabelBody:
+      type: object
+      properties:
+        model:
+          type: string
+          default: google/gemini-3.8-flash
+        kind:
+          type: string
+          enum: [product, expiry]
+        imageData:
+          type: string
+          description: Data URL containing a compressed label photo
+      required:
+        - kind
+        - imageData
+    AnalyzePantryLabelResponse:
+      type: object
+      properties:
+        name:
+          type: string
+        expiryDate:
+          type: string
+        confidence:
+          type: number
+      required: []
+    ApiError:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
 
