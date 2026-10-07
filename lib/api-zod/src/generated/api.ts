@@ -21,9 +21,13 @@ export const HealthCheckResponse = zod.object({
  * @summary Read a pantry label photo with OpenRouter
  */
 export const analyzePantryLabelBodyModelDefault = `google/gemini-3.8-flash`;
+export const analyzePantryLabelBodyOpenRouterApiKeyMax = 1024;
+
+
 
 export const AnalyzePantryLabelBody = zod.object({
   "model": zod.string().default(analyzePantryLabelBodyModelDefault),
+  "openRouterApiKey": zod.string().max(analyzePantryLabelBodyOpenRouterApiKeyMax).optional().describe('Optional user-provided OpenRouter key; used for this request only.'),
   "kind": zod.enum(['product', 'expiry']),
   "imageData": zod.string().describe('Data URL containing a compressed label photo')
 })

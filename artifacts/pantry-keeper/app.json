@@ -17,7 +17,12 @@
     "web": {
       "favicon": "./assets/images/icon.png"
     },
-    "plugins": ["expo-router", "expo-camera", "expo-notifications"],
+    "plugins": [
+      "expo-router",
+      "expo-camera",
+      "expo-notifications",
+      "expo-secure-store"
+    ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true

@@ -59,6 +59,12 @@ const colors = {
     amber: '#b87927',
     terracotta: '#c8644b',
     white: '#fffdf8',
+    summaryStart: '#173128',
+    summaryEnd: '#2f7255',
+    summaryForeground: '#fffdf8',
+    summaryMutedForeground: '#c3d6bf',
+    summaryDivider: 'rgba(255,253,248,0.23)',
+    summaryIconBackground: 'rgba(255,253,248,0.12)',
   },
 
   dark: {
@@ -88,6 +94,12 @@ const colors = {
     amber: '#f1bb66',
     terracotta: '#e4896d',
     white: '#1d3026',
+    summaryStart: '#0c1812',
+    summaryEnd: '#193528',
+    summaryForeground: '#f2f4ec',
+    summaryMutedForeground: '#bed2c2',
+    summaryDivider: 'rgba(242,244,236,0.26)',
+    summaryIconBackground: 'rgba(242,244,236,0.12)',
   },
 
   // Border radius (in px). Sync from the sibling web artifact's --radius

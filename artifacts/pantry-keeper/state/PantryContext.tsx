@@ -1,5 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Notifications from 'expo-notifications';
+import * as SecureStore from 'expo-secure-store';
+import { getPermissionsAsync, requestPermissionsAsync } from 'expo-notifications/build/NotificationPermissions';
+import { setNotificationHandler } from 'expo-notifications/build/NotificationsHandler';
+import { SchedulableTriggerInputTypes } from 'expo-notifications/build/Notifications.types';
+import { cancelAllScheduledNotificationsAsync } from 'expo-notifications/build/cancelAllScheduledNotificationsAsync';
+import { scheduleNotificationAsync } from 'expo-notifications/build/scheduleNotificationAsync';
 import React, {
   createContext,
   ReactNode,
@@ -36,15 +41,19 @@ type ItemDraft = Omit<PantryItem, 'id' | 'addedAt'>;
 type PantryContextValue = {
   items: PantryItem[];
   settings: PantrySettings;
+  openRouterApiKey: string;
   isHydrated: boolean;
   addItem: (draft: ItemDraft) => Promise<void>;
   removeItem: (id: string) => Promise<void>;
+  moveItemToShelf: (id: string, shelf: string) => Promise<void>;
   updateSettings: (patch: Partial<PantrySettings>) => Promise<void>;
+  updateOpenRouterApiKey: (key: string) => Promise<void>;
   requestNotificationPermission: () => Promise<boolean>;
 };
 
 const ITEMS_KEY = '@pantry-keeper/items';
 const SETTINGS_KEY = '@pantry-keeper/settings';
+const OPENROUTER_API_KEY_KEY = '@pantry-keeper/openrouter-api-key';
 const DEFAULT_SETTINGS: PantrySettings = {
   shelves: ['Top shelf', 'Middle shelf', 'Bottom shelf'],
   reminderDays: 30,
@@ -55,7 +64,7 @@ const DEFAULT_SETTINGS: PantrySettings = {
   localApiKey: '',
 };
 
-Notifications.setNotificationHandler({
+setNotificationHandler({
   handleNotification: async () => ({
     shouldShowBanner: true,
     shouldShowList: true,
@@ -79,6 +88,7 @@ function reminderDate(expiryDate: string, days: number) {
 export function PantryProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<PantryItem[]>([]);
   const [settings, setSettings] = useState<PantrySettings>(DEFAULT_SETTINGS);
+  const [openRouterApiKey, setOpenRouterApiKey] = useState('');
   const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
@@ -96,6 +106,13 @@ export function PantryProvider({ children }: { children: ReactNode }) {
             ...DEFAULT_SETTINGS,
             ...(JSON.parse(storedSettings) as Partial<PantrySettings>),
           });
+        }
+        try {
+          setOpenRouterApiKey(
+            (await SecureStore.getItemAsync(OPENROUTER_API_KEY_KEY)) ?? '',
+          );
+        } catch {
+          // Pantry data remains available even if the device secure store is unavailable.
         }
       } catch {
         // A fresh local store is a safe fallback if storage is unavailable.
@@ -121,20 +138,20 @@ export function PantryProvider({ children }: { children: ReactNode }) {
     reminderDays: number,
   ) => {
     if (Platform.OS === 'web') return;
-    const permission = await Notifications.getPermissionsAsync();
+    const permission = await getPermissionsAsync();
     if (!permission.granted) return;
-    await Notifications.cancelAllScheduledNotificationsAsync();
+    await cancelAllScheduledNotificationsAsync();
     for (const item of reminderItems) {
       const date = reminderDate(item.expiryDate, reminderDays);
       if (date.getTime() <= Date.now()) continue;
-      await Notifications.scheduleNotificationAsync({
+      await scheduleNotificationAsync({
         content: {
           title: 'Pantry check-in',
           body: `${item.name} on ${item.shelf} is ready to use soon.`,
           data: { itemId: item.id },
         },
         trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          type: SchedulableTriggerInputTypes.DATE,
           date,
         },
       });
@@ -143,9 +160,9 @@ export function PantryProvider({ children }: { children: ReactNode }) {
 
   const requestNotificationPermission = async () => {
     if (Platform.OS === 'web') return false;
-    const current = await Notifications.getPermissionsAsync();
+    const current = await getPermissionsAsync();
     if (current.granted) return true;
-    const requested = await Notifications.requestPermissionsAsync();
+    const requested = await requestPermissionsAsync();
     if (requested.granted) {
       await scheduleReminders(items, settings.reminderDays);
     }
@@ -167,6 +184,18 @@ export function PantryProvider({ children }: { children: ReactNode }) {
     setItems((current) => current.filter((item) => item.id !== id));
   };
 
+  const moveItemToShelf = async (id: string, shelf: string) => {
+    const nextItems = items.map((item) =>
+      item.id === id ? { ...item, shelf } : item,
+    );
+    setItems(nextItems);
+    try {
+      await scheduleReminders(nextItems, settings.reminderDays);
+    } catch {
+      // Moving the item should still succeed if notification refresh is unavailable.
+    }
+  };
+
   const updateSettings = async (patch: Partial<PantrySettings>) => {
     const nextSettings = { ...settings, ...patch };
     setSettings(nextSettings);
@@ -175,17 +204,30 @@ export function PantryProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const updateOpenRouterApiKey = async (key: string) => {
+    const trimmedKey = key.trim();
+    if (trimmedKey) {
+      await SecureStore.setItemAsync(OPENROUTER_API_KEY_KEY, trimmedKey);
+    } else {
+      await SecureStore.deleteItemAsync(OPENROUTER_API_KEY_KEY);
+    }
+    setOpenRouterApiKey(trimmedKey);
+  };
+
   const value = useMemo(
     () => ({
       items,
       settings,
+      openRouterApiKey,
       isHydrated,
       addItem,
       removeItem,
+      moveItemToShelf,
       updateSettings,
+      updateOpenRouterApiKey,
       requestNotificationPermission,
     }),
-    [items, settings, isHydrated],
+    [items, settings, openRouterApiKey, isHydrated],
   );
 
   return (

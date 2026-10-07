@@ -19,6 +19,11 @@ export const AnalyzePantryLabelBodyKind = {
 
 export interface AnalyzePantryLabelBody {
   model?: string;
+  /**
+     * Optional user-provided OpenRouter key; used for this request only.
+     * @maxLength 1024
+     */
+  openRouterApiKey?: string;
   kind: AnalyzePantryLabelBodyKind;
   /** Data URL containing a compressed label photo */
   imageData: string;

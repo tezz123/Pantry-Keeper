@@ -27,13 +27,13 @@ router.post("/ai/analyze-label", async (req, res) => {
     return;
   }
 
-  const apiKey = process.env["OPENROUTER_API_KEY"];
+  const { kind, imageData, model, openRouterApiKey } = parsed.data;
+  const apiKey = openRouterApiKey?.trim() || process.env["OPENROUTER_API_KEY"];
   if (!apiKey) {
-    res.status(503).json({ error: "OpenRouter is not configured for this project." });
+    res.status(503).json({ error: "Add an OpenRouter key in Settings or configure one for this project." });
     return;
   }
 
-  const { kind, imageData, model } = parsed.data;
   const prompt =
     kind === "product"
       ? "Read the main food product name from this pantry label. Ignore brand slogans, nutrition facts, and marketing copy."
@@ -69,8 +69,7 @@ router.post("/ai/analyze-label", async (req, res) => {
     });
 
     if (!providerResponse.ok) {
-      const details = await providerResponse.text();
-      req.log.error({ status: providerResponse.status, details }, "OpenRouter label analysis failed");
+      req.log.error({ status: providerResponse.status }, "OpenRouter label analysis failed");
       res.status(502).json({ error: "OpenRouter could not read this label." });
       return;
     }
@@ -94,8 +93,8 @@ router.post("/ai/analyze-label", async (req, res) => {
           ? result.confidence
           : 0,
     });
-  } catch (error) {
-    req.log.error({ error }, "Label analysis request failed");
+  } catch {
+    req.log.error("Label analysis request failed");
     res.status(502).json({ error: "The AI provider could not be reached." });
   }
 });

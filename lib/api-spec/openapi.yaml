@@ -71,6 +71,10 @@ components:
         model:
           type: string
           default: google/gemini-3.8-flash
+        openRouterApiKey:
+          type: string
+          maxLength: 1024
+          description: Optional user-provided OpenRouter key; used for this request only.
         kind:
           type: string
           enum: [product, expiry]

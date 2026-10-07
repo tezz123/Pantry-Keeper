@@ -3,13 +3,11 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { File } from 'expo-file-system';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,6 +16,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { KeyboardAwareScrollViewCompat } from '@/components/KeyboardAwareScrollViewCompat';
 import { useColors } from '@/hooks/useColors';
 import {
   PantryItem,
@@ -67,6 +66,7 @@ async function readLabelPhoto(
   uri: string,
   kind: LabelKind,
   settings: PantrySettings,
+  openRouterApiKey: string,
 ): Promise<LabelReadResult> {
   const file = new File(uri);
   const imageData = `data:image/jpeg;base64,${await file.base64()}`;
@@ -122,6 +122,7 @@ async function readLabelPhoto(
     body: JSON.stringify({
       kind,
       model: settings.openRouterModel.trim(),
+      openRouterApiKey: openRouterApiKey.trim() || undefined,
       imageData,
     }),
   });
@@ -159,10 +160,16 @@ function itemTone(item: PantryItem, colors: ReturnType<typeof useColors>) {
 function HomeScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { items, settings, isHydrated, removeItem, requestNotificationPermission } =
-    usePantry();
+  const {
+    items,
+    settings,
+    isHydrated,
+    removeItem,
+    requestNotificationPermission,
+  } = usePantry();
   const [showAdd, setShowAdd] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [itemToMove, setItemToMove] = useState<PantryItem | null>(null);
   const [filterShelf, setFilterShelf] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
 
@@ -244,36 +251,36 @@ function HomeScreen() {
         </View>
 
         <LinearGradient
-          colors={[colors.forest, colors.green]}
+          colors={[colors.summaryStart, colors.summaryEnd]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.summaryCard}
         >
           <View style={styles.summaryTop}>
             <View>
-              <Text style={styles.summaryLabel}>STORAGE SNAPSHOT</Text>
-              <Text style={styles.summaryTitle}>
+              <Text style={[styles.summaryLabel, { color: colors.summaryMutedForeground }]}>STORAGE SNAPSHOT</Text>
+              <Text style={[styles.summaryTitle, { color: colors.summaryForeground }]}>
                 {items.length === 0 ? 'Your pantry is ready.' : `${items.length} ${items.length === 1 ? 'item' : 'items'} stored`}
               </Text>
             </View>
-            <View style={styles.jarMark}>
-              <Ionicons name="basket-outline" size={25} color={colors.sand} />
+            <View style={[styles.jarMark, { backgroundColor: colors.summaryIconBackground }]}>
+              <Ionicons name="basket-outline" size={25} color={colors.summaryForeground} />
             </View>
           </View>
           <View style={styles.summaryStats}>
             <View>
-              <Text style={styles.statNumber}>{expiringSoon.length}</Text>
-              <Text style={styles.statLabel}>use soon</Text>
+              <Text style={[styles.statNumber, { color: colors.summaryForeground }]}>{expiringSoon.length}</Text>
+              <Text style={[styles.statLabel, { color: colors.summaryMutedForeground }]}>use soon</Text>
             </View>
-            <View style={styles.statDivider} />
+            <View style={[styles.statDivider, { backgroundColor: colors.summaryDivider }]} />
             <View>
-              <Text style={styles.statNumber}>{expired.length}</Text>
-              <Text style={styles.statLabel}>past expiry</Text>
+              <Text style={[styles.statNumber, { color: colors.summaryForeground }]}>{expired.length}</Text>
+              <Text style={[styles.statLabel, { color: colors.summaryMutedForeground }]}>past expiry</Text>
             </View>
-            <View style={styles.statDivider} />
+            <View style={[styles.statDivider, { backgroundColor: colors.summaryDivider }]} />
             <View>
-              <Text style={styles.statNumber}>{settings.shelves.length}</Text>
-              <Text style={styles.statLabel}>shelves</Text>
+              <Text style={[styles.statNumber, { color: colors.summaryForeground }]}>{settings.shelves.length}</Text>
+              <Text style={[styles.statLabel, { color: colors.summaryMutedForeground }]}>shelves</Text>
             </View>
           </View>
         </LinearGradient>
@@ -352,6 +359,9 @@ function HomeScreen() {
               return (
                 <Pressable
                   key={item.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Move ${item.name} to another shelf`}
+                  onPress={() => setItemToMove(item)}
                   onLongPress={() => void confirmRemove(item)}
                   delayLongPress={450}
                   style={({ pressed }) => [
@@ -387,7 +397,7 @@ function HomeScreen() {
 
         {items.length > 0 ? (
           <Text style={[styles.listHint, { color: colors.mutedForeground }]}>
-            Press and hold an item to remove it
+            Tap an item to move it · Press and hold to remove it
           </Text>
         ) : null}
 
@@ -430,6 +440,7 @@ function HomeScreen() {
 
       <AddItemModal visible={showAdd} onClose={() => setShowAdd(false)} />
       <SettingsModal visible={showSettings} onClose={() => setShowSettings(false)} />
+      <MoveItemModal item={itemToMove} onClose={() => setItemToMove(null)} />
     </View>
   );
 }
@@ -437,7 +448,7 @@ function HomeScreen() {
 function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { settings, addItem } = usePantry();
+  const { settings, openRouterApiKey, addItem } = usePantry();
   const [step, setStep] = useState<AddStep>('product');
   const [cameraMode, setCameraMode] = useState<CaptureMode | null>(null);
   const [analysisState, setAnalysisState] = useState<
@@ -475,7 +486,7 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
     setAnalysisState('reading');
     setAnalysisMessage('');
     try {
-      const result = await readLabelPhoto(uri, kind, settings);
+      const result = await readLabelPhoto(uri, kind, settings, openRouterApiKey);
       if (kind === 'product' && result.name) {
         setDraft((current) => ({ ...current, name: result.name ?? current.name }));
       }
@@ -531,10 +542,7 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={close}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={[styles.modalScreen, { backgroundColor: colors.background }]}
-      >
+      <View style={[styles.modalScreen, { backgroundColor: colors.background }]}>
         <View style={[styles.modalHeader, { paddingTop: insets.top + 8 }]}>
           <Pressable accessibilityLabel="Close add item" onPress={close} style={styles.modalIconButton}>
             <Ionicons name="close" size={25} color={colors.forest} />
@@ -553,10 +561,11 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
           </View>
         </View>
 
-        <ScrollView
+        <KeyboardAwareScrollViewCompat
           contentContainerStyle={[styles.modalContent, { paddingBottom: insets.bottom + 36 }]}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          bottomOffset={20}
         >
           {step === 'product' ? (
             <>
@@ -575,6 +584,17 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
                 state={analysisState}
                 message={analysisMessage}
                 colors={colors}
+              />
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>Product name</Text>
+              <TextInput
+                testID="product-step-name-input"
+                value={draft.name}
+                onChangeText={(name) => setDraft((current) => ({ ...current, name }))}
+                placeholder="Type the product name"
+                placeholderTextColor={colors.mutedForeground}
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+                autoCapitalize="sentences"
+                returnKeyType="done"
               />
               {draft.barcode ? (
                 <View style={[styles.detectedRow, { backgroundColor: colors.sage }]}>
@@ -615,6 +635,20 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
                 state={analysisState}
                 message={analysisMessage}
                 colors={colors}
+              />
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>Expiry date</Text>
+              <TextInput
+                testID="expiry-step-date-input"
+                value={draft.expiryDate}
+                onChangeText={(expiryDate) => {
+                  setDateError('');
+                  setDraft((current) => ({ ...current, expiryDate }));
+                }}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={colors.mutedForeground}
+                keyboardType="numbers-and-punctuation"
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+                returnKeyType="done"
               />
               <View style={[styles.infoBox, { backgroundColor: colors.accent }]}>
                 <Ionicons name="sparkles-outline" size={18} color={colors.amber} />
@@ -715,7 +749,7 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
               </Pressable>
             </>
           ) : null}
-        </ScrollView>
+        </KeyboardAwareScrollViewCompat>
         {cameraMode ? (
           <CameraModal
             mode={cameraMode}
@@ -737,7 +771,7 @@ function AddItemModal({ visible, onClose }: { visible: boolean; onClose: () => v
             }}
           />
         ) : null}
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
@@ -933,8 +967,20 @@ function CameraModal({
 function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { settings, updateSettings, requestNotificationPermission } = usePantry();
+  const {
+    settings,
+    openRouterApiKey,
+    updateOpenRouterApiKey,
+    updateSettings,
+    requestNotificationPermission,
+  } = usePantry();
   const [newShelf, setNewShelf] = useState('');
+  const [apiKeyDraft, setApiKeyDraft] = useState('');
+  const [savingApiKey, setSavingApiKey] = useState(false);
+
+  useEffect(() => {
+    if (visible) setApiKeyDraft(openRouterApiKey);
+  }, [visible, openRouterApiKey]);
 
   async function addShelf() {
     const value = newShelf.trim();
@@ -943,12 +989,25 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
     setNewShelf('');
   }
 
+  async function saveApiKey(key: string) {
+    setSavingApiKey(true);
+    try {
+      await updateOpenRouterApiKey(key);
+      setApiKeyDraft(key.trim());
+    } catch {
+      setApiKeyDraft(openRouterApiKey);
+      Alert.alert(
+        'Could not save key',
+        'Secure storage is unavailable. Your existing key was not changed.',
+      );
+    } finally {
+      setSavingApiKey(false);
+    }
+  }
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={[styles.modalScreen, { backgroundColor: colors.background }]}
-      >
+      <View style={[styles.modalScreen, { backgroundColor: colors.background }]}>
         <View style={[styles.modalHeader, { paddingTop: insets.top + 8 }]}>
           <Pressable onPress={onClose} style={styles.modalIconButton}>
             <Ionicons name="close" size={25} color={colors.forest} />
@@ -956,7 +1015,11 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
           <Text style={[styles.modalTitle, { color: colors.forest }]}>Settings</Text>
           <View style={styles.modalHeaderSpacer} />
         </View>
-        <ScrollView contentContainerStyle={[styles.modalContent, { paddingBottom: insets.bottom + 36 }]} showsVerticalScrollIndicator={false}>
+        <KeyboardAwareScrollViewCompat
+          contentContainerStyle={[styles.modalContent, { paddingBottom: insets.bottom + 36 }]}
+          showsVerticalScrollIndicator={false}
+          bottomOffset={20}
+        >
           <Text style={[styles.modalEyebrow, { color: colors.green }]}>REMINDERS</Text>
           <Text style={[styles.modalHeading, { color: colors.forest }]}>Choose your lead time</Text>
           <Text style={[styles.modalDescription, { color: colors.mutedForeground }]}>
@@ -1044,6 +1107,51 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
               <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
                 The hosted default uses Google Gemini through OpenRouter, not xAI.
               </Text>
+              <Text style={[styles.inputLabel, { color: colors.forest }]}>Your OpenRouter API key</Text>
+              <TextInput
+                testID="openrouter-api-key-input"
+                value={apiKeyDraft}
+                onChangeText={setApiKeyDraft}
+                placeholder="sk-or-…"
+                placeholderTextColor={colors.mutedForeground}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
+                returnKeyType="done"
+              />
+              <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
+                Stored securely on this device. Sent to Pantry Keeper’s API only when you scan a label.
+              </Text>
+              <View style={styles.apiKeyActions}>
+                <Pressable
+                  testID="save-openrouter-api-key"
+                  disabled={savingApiKey}
+                  onPress={() => void saveApiKey(apiKeyDraft)}
+                  style={({ pressed }) => [
+                    styles.apiKeySaveButton,
+                    { backgroundColor: colors.green, opacity: savingApiKey ? 0.7 : 1 },
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  {savingApiKey ? (
+                    <ActivityIndicator size="small" color={colors.white} />
+                  ) : (
+                    <Ionicons name="lock-closed-outline" size={16} color={colors.white} />
+                  )}
+                  <Text style={styles.apiKeySaveText}>Save key</Text>
+                </Pressable>
+                {openRouterApiKey ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={savingApiKey}
+                    onPress={() => void saveApiKey('')}
+                    style={({ pressed }) => [styles.apiKeyClearButton, pressed && styles.pressed]}
+                  >
+                    <Text style={[styles.apiKeyClearText, { color: colors.terracotta }]}>Remove key</Text>
+                  </Pressable>
+                ) : null}
+              </View>
             </>
           ) : (
             <>
@@ -1114,8 +1222,99 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
               <Ionicons name="add" size={22} color={colors.green} />
             </Pressable>
           </View>
+        </KeyboardAwareScrollViewCompat>
+      </View>
+    </Modal>
+  );
+}
+
+function MoveItemModal({
+  item,
+  onClose,
+}: {
+  item: PantryItem | null;
+  onClose: () => void;
+}) {
+  const colors = useColors();
+  const insets = useSafeAreaInsets();
+  const { settings, moveItemToShelf } = usePantry();
+  const [moving, setMoving] = useState(false);
+
+  async function moveToShelf(shelf: string) {
+    if (!item || moving || shelf === item.shelf) return;
+    setMoving(true);
+    try {
+      await moveItemToShelf(item.id, shelf);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      onClose();
+    } catch {
+      Alert.alert(
+        'Item moved',
+        `${item.name} is now on ${shelf}, but its reminder may still mention the previous shelf.`,
+      );
+      onClose();
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  return (
+    <Modal visible={item !== null} animationType="slide" onRequestClose={onClose}>
+      <View style={[styles.modalScreen, { backgroundColor: colors.background }]}>
+        <View style={[styles.modalHeader, { paddingTop: insets.top + 8 }]}>
+          <Pressable accessibilityLabel="Close move item" onPress={onClose} style={styles.modalIconButton}>
+            <Ionicons name="close" size={25} color={colors.forest} />
+          </Pressable>
+          <Text style={[styles.modalTitle, { color: colors.forest }]}>Move item</Text>
+          <View style={styles.modalHeaderSpacer} />
+        </View>
+        <ScrollView
+          contentContainerStyle={[styles.modalContent, { paddingBottom: insets.bottom + 36 }]}
+          showsVerticalScrollIndicator={false}
+        >
+          <Text style={[styles.modalEyebrow, { color: colors.green }]}>STORAGE</Text>
+          <Text style={[styles.modalHeading, { color: colors.forest }]}>Choose a shelf</Text>
+          <Text style={[styles.modalDescription, { color: colors.mutedForeground }]}>
+            {item ? `${item.name} is currently on ${item.shelf}.` : ''}
+          </Text>
+          <View style={styles.shelfGrid}>
+            {settings.shelves.map((shelf) => {
+              const isCurrentShelf = shelf === item?.shelf;
+              return (
+                <Pressable
+                  key={shelf}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: isCurrentShelf, disabled: moving || isCurrentShelf }}
+                  disabled={moving || isCurrentShelf}
+                  onPress={() => void moveToShelf(shelf)}
+                  style={[
+                    styles.shelfChoice,
+                    {
+                      backgroundColor: isCurrentShelf ? colors.sage : colors.card,
+                      borderColor: isCurrentShelf ? colors.green : colors.border,
+                      opacity: moving ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Feather
+                    name={isCurrentShelf ? 'check-circle' : 'circle'}
+                    size={16}
+                    color={isCurrentShelf ? colors.green : colors.mutedForeground}
+                  />
+                  <Text style={[styles.shelfChoiceText, { color: isCurrentShelf ? colors.green : colors.forest }]}>
+                    {shelf}{isCurrentShelf ? ' · current' : ''}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {settings.shelves.length < 2 ? (
+            <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
+              Add another shelf in Settings to move this item.
+            </Text>
+          ) : null}
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
@@ -1139,13 +1338,13 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.72 },
   summaryCard: { borderRadius: 25, padding: 20, marginBottom: 28 },
   summaryTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  summaryLabel: { color: '#c3d6bf', fontSize: 10, fontFamily: 'Inter_700Bold', letterSpacing: 1.5, marginBottom: 8 },
-  summaryTitle: { color: '#fffdf8', fontSize: 20, fontFamily: 'Inter_600SemiBold', letterSpacing: -0.3 },
-  jarMark: { width: 49, height: 49, borderRadius: 17, backgroundColor: 'rgba(255,253,248,0.12)', alignItems: 'center', justifyContent: 'center' },
+  summaryLabel: { fontSize: 10, fontFamily: 'Inter_700Bold', letterSpacing: 1.5, marginBottom: 8 },
+  summaryTitle: { fontSize: 20, fontFamily: 'Inter_600SemiBold', letterSpacing: -0.3 },
+  jarMark: { width: 49, height: 49, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   summaryStats: { flexDirection: 'row', alignItems: 'center', marginTop: 26 },
-  statNumber: { color: '#fffdf8', fontSize: 23, fontFamily: 'Inter_700Bold' },
-  statLabel: { color: '#c3d6bf', fontSize: 11, fontFamily: 'Inter_500Medium', marginTop: 2 },
-  statDivider: { width: 1, height: 32, backgroundColor: 'rgba(255,253,248,0.23)', marginHorizontal: 23 },
+  statNumber: { fontSize: 23, fontFamily: 'Inter_700Bold' },
+  statLabel: { fontSize: 11, fontFamily: 'Inter_500Medium', marginTop: 2 },
+  statDivider: { width: 1, height: 32, marginHorizontal: 23 },
   sectionHeading: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 },
   sectionTitle: { fontSize: 21, fontFamily: 'Inter_700Bold', letterSpacing: -0.4 },
   sectionCount: { fontSize: 12, fontFamily: 'Inter_500Medium' },
@@ -1247,4 +1446,9 @@ const styles = StyleSheet.create({
   providerChoice: { flex: 1, minHeight: 48, borderWidth: 1, borderRadius: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
   providerChoiceText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
   settingsHint: { fontSize: 11, lineHeight: 17, fontFamily: 'Inter_400Regular', marginTop: 7 },
+  apiKeyActions: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 },
+  apiKeySaveButton: { minHeight: 45, borderRadius: 14, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 7 },
+  apiKeySaveText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  apiKeyClearButton: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 8 },
+  apiKeyClearText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
 });
