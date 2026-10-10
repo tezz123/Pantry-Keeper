@@ -8,9 +8,22 @@
     "scheme": "pantry-keeper",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.tezz.pantrykeeper"
     },
-    "android": {},
+    "android": {
+      "package": "com.tezz.pantrykeeper",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon.png",
+        "backgroundColor": "#f7f6f1"
+      },
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
     "splash": {
       "backgroundColor": "#f7f6f1"
     },
