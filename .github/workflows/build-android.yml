@@ -16,6 +16,9 @@ permissions:
 
 env:
   APP_DIR: artifacts/pantry-keeper
+  ANDROID_HOME: /opt/android-sdk
+  ANDROID_SDK_ROOT: /opt/android-sdk
+  JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
 
 jobs:
   build:
@@ -33,15 +36,22 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-
-      - name: Setup Java (JDK 17)
-        uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          version: 9
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Java and Android SDK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openjdk-17-jdk-headless unzip wget
+          java -version
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          cd /tmp
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-11076708_latest.zip
+          mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root="$ANDROID_HOME" \
+            "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          echo "Android SDK installed at $ANDROID_HOME"
 
       - name: Cache pnpm store
         uses: actions/cache@v4
@@ -51,23 +61,26 @@ jobs:
           restore-keys: pnpm-store-${{ runner.os }}-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Generate native Android project
         working-directory: ${{ env.APP_DIR }}
         run: pnpm exec expo prebuild --platform android --no-install
 
       - name: Setup signing
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KB64: ${{ secrets.KEYSTORE_BASE64 }}
+          KSPW: ${{ secrets.KEYSTORE_PASSWORD }}
+          KALIAS: ${{ secrets.KEY_ALIAS }}
+          KPW: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > "${{ env.APP_DIR }}/android/app/release.keystore"
-          printf 'RELEASE_STORE_FILE=release.keystore\nRELEASE_STORE_PASSWORD=%s\nRELEASE_KEY_ALIAS=%s\nRELEASE_KEY_PASSWORD=%s\n' \
-            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" \
+          if [ -z "$KB64" ]; then
+            echo "No signing key - skipping (debug build)"
+            exit 0
+          fi
+          echo "$KB64" | base64 -d > "${{ env.APP_DIR }}/android/app/release.keystore"
+          printf 'RELEASE_STORE_FILE=release.keystore\nRELEASE_STORE_PASSWORD=%s\nRELEASE_KEY_ALIAS=%s\nRELEASE_KEY_PASSWORD=%s\n' \\
+            "$KSPW" "$KALIAS" "$KPW" \\
             > "${{ env.APP_DIR }}/android/signing.properties"
           python3 .github/scripts/patch-signing.py "${{ env.APP_DIR }}/android"
 
@@ -84,7 +97,7 @@ jobs:
       - name: Locate APK
         id: apk
         run: |
-          APK=$(find "${{ env.APP_DIR }}/android/app/build/outputs/apk" -name '*.apk' | head -1)
+          APK=$(find "${{ env.APP_DIR }}/android/app/build/outputs/apk" -name "*.apk" | head -1)
           if [ -z "$APK" ]; then
             echo "ERROR: No APK found"
             exit 1
