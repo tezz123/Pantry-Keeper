@@ -2,131 +2,156 @@ name: Build Android APK
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v1.0.0). Leave empty to use git tag or generate one.'
+        description: 'Release tag (e.g. v1.0.0). Leave empty to generate one.'
         required: false
         type: string
 
-permissions:
-  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   APP_DIR: artifacts/pantry-keeper
-  ANDROID_HOME: /opt/android-sdk
-  ANDROID_SDK_ROOT: /opt/android-sdk
-  JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+  # A single ABI cuts native (C++) compilation to a quarter of the default
+  # four-ABI build. Virtually all current Android phones are arm64.
+  ABIS: arm64-v8a
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      # Hosted label-recognition endpoint, inlined into the JS bundle at build
+      # time. Set it as a repository variable; local-model mode works without it.
+      EXPO_PUBLIC_DOMAIN: ${{ vars.EXPO_PUBLIC_DOMAIN }}
+      # Route NDK C/C++ compilation of native modules through ccache.
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime,time_macros
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: pnpm
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          version: 9
+          distribution: temurin
+          java-version: 17
 
-      - name: Setup Java and Android SDK
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq openjdk-17-jdk-headless unzip wget
-          java -version
-          mkdir -p "$ANDROID_HOME/cmdline-tools"
-          cd /tmp
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-          unzip -q commandlinetools-linux-11076708_latest.zip
-          mv cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root="$ANDROID_HOME" \
-            "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-          echo "Android SDK installed at $ANDROID_HOME"
-
-      - name: Cache pnpm store
-        uses: actions/cache@v4
+      # The runner image already ships the Android SDK in $ANDROID_HOME; Gradle
+      # only downloads the exact NDK/build-tools versions that are missing.
+      - name: Setup Gradle (dependency + build cache)
+        uses: gradle/actions/setup-gradle@v4
         with:
-          path: ~/.local/share/pnpm/store/v10
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-
+          # Caches are written by main-branch runs and reused by tags and PRs.
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: android-${{ env.ABIS }}
+          max-size: 2G
+          save: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install dependencies (app only)
+        run: pnpm install --frozen-lockfile --filter "@workspace/pantry-keeper..."
 
       - name: Generate native Android project
         working-directory: ${{ env.APP_DIR }}
         run: pnpm exec expo prebuild --platform android --no-install
 
-      - name: Setup signing
-        env:
-          KB64: ${{ secrets.KEYSTORE_BASE64 }}
-          KSPW: ${{ secrets.KEYSTORE_PASSWORD }}
-          KALIAS: ${{ secrets.KEY_ALIAS }}
-          KPW: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          if [ -z "$KB64" ]; then
-            echo "No signing key - skipping (debug build)"
-            exit 0
-          fi
-          echo "$KB64" | base64 -d > "${{ env.APP_DIR }}/android/app/release.keystore"
-          printf 'RELEASE_STORE_FILE=release.keystore\nRELEASE_STORE_PASSWORD=%s\nRELEASE_KEY_ALIAS=%s\nRELEASE_KEY_PASSWORD=%s\n' \\
-            "$KSPW" "$KALIAS" "$KPW" \\
-            > "${{ env.APP_DIR }}/android/signing.properties"
-          python3 .github/scripts/patch-signing.py "${{ env.APP_DIR }}/android"
-
-      - name: Build APK
+      - name: Tune Gradle for CI
         working-directory: ${{ env.APP_DIR }}/android
         run: |
-          chmod +x gradlew
-          if [ -f "signing.properties" ]; then
-            ./gradlew assembleRelease --no-daemon --stacktrace
-          else
-            ./gradlew assembleDebug --no-daemon --stacktrace
-          fi
+          sed -i '/^org.gradle.jvmargs=/d;/^org.gradle.parallel=/d;/^reactNativeArchitectures=/d' gradle.properties
+          # The generated file has no trailing newline.
+          echo >> gradle.properties
+          cat >> gradle.properties <<EOF
+          org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          reactNativeArchitectures=${ABIS}
+          EOF
 
-      - name: Locate APK
+      # Always build the release variant: debug APKs do not embed the JS bundle
+      # and need a running Metro server. Without signing secrets the template's
+      # debug keystore signs the APK, which is fine for sideloading.
+      - name: Build APK
+        working-directory: ${{ env.APP_DIR }}/android
+        run: ./gradlew assembleRelease --init-script "$GITHUB_WORKSPACE/.github/gradle/ci.init.gradle"
+
+      - name: Sign APK with release key
         id: apk
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          APK=$(find "${{ env.APP_DIR }}/android/app/build/outputs/apk" -name "*.apk" | head -1)
-          if [ -z "$APK" ]; then
-            echo "ERROR: No APK found"
-            exit 1
-          fi
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename "$APK")" >> "$GITHUB_OUTPUT"
-          echo "Found APK: $APK"
-
-      - name: Determine release tag
-        id: tag
-        run: |
-          if [ -n "${{ inputs.release_tag }}" ]; then
-            TAG="${{ inputs.release_tag }}"
-          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            TAG="${GITHUB_REF_NAME}"
+          APK="$APP_DIR/android/app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK" || { echo "ERROR: $APK not found"; exit 1; }
+          OUT="$RUNNER_TEMP/pantry-keeper-${ABIS}.apk"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            BUILD_TOOLS="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+            KEYSTORE="$RUNNER_TEMP/release.keystore"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks "$KEYSTORE" \
+              --ks-pass env:KEYSTORE_PASSWORD \
+              --ks-key-alias "$KEY_ALIAS" \
+              --key-pass env:KEY_PASSWORD \
+              --out "$OUT" "$APK"
+            rm -f "$KEYSTORE"
+            "$BUILD_TOOLS/apksigner" verify --print-certs "$OUT" | grep -i "certificate DN"
           else
-            TAG="v$(date +%Y%m%d.%H%M%S)"
+            echo "::warning::No KEYSTORE_BASE64 secret set; the APK is signed with the debug key"
+            cp "$APK" "$OUT"
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $TAG"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: pantry-keeper-apk
           path: ${{ steps.apk.outputs.path }}
-          retention-days: 90
+          retention-days: 30
+
+      - name: Determine release tag
+        id: tag
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(date +%Y%m%d.%H%M%S)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        if: steps.tag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
@@ -135,7 +160,7 @@ jobs:
             ## Pantry Keeper ${{ steps.tag.outputs.tag }}
 
             ### Install
-            Download the APK below and install on your Android device.
+            Download the APK below and install it on your Android device (arm64).
             Or add this repo to [Obtainium](https://github.com/ImranR98/Obtainium) for automatic updates.
 
             **Obtainium URL:** `https://github.com/${{ github.repository }}`

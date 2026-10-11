@@ -45,7 +45,6 @@ router.post("/ai/analyze-label", async (req, res) => {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://replit.com",
         "X-Title": "Pantry Keeper",
       },
       body: JSON.stringify({

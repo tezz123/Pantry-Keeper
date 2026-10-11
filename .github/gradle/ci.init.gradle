@@ -1,0 +1,8 @@
+// Applied only in CI via --init-script.
+// Release builds run "lint vital" analysis on every module, which costs
+// several minutes and is not a release gate for this project.
+allprojects {
+    tasks.matching { it.name.startsWith("lintVital") }.configureEach {
+        enabled = false
+    }
+}
