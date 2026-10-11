@@ -53,7 +53,8 @@ type PantryContextValue = {
 
 const ITEMS_KEY = '@pantry-keeper/items';
 const SETTINGS_KEY = '@pantry-keeper/settings';
-const OPENROUTER_API_KEY_KEY = '@pantry-keeper/openrouter-api-key';
+// SecureStore keys may only contain alphanumerics, '.', '-' and '_'.
+const OPENROUTER_API_KEY_KEY = 'pantry-keeper.openrouter-api-key';
 const DEFAULT_SETTINGS: PantrySettings = {
   shelves: ['Top shelf', 'Middle shelf', 'Bottom shelf'],
   reminderDays: 30,

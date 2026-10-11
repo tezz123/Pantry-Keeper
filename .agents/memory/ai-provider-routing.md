@@ -1,10 +1,10 @@
 ---
 name: AI provider routing
-description: Hosted label recognition uses a server-side OpenRouter secret; local OpenAI-compatible models are called directly from the mobile app.
+description: The app has no backend; label recognition calls OpenRouter or a local OpenAI-compatible model directly from the device.
 ---
 
-Keep the project-owned OpenRouter credential server-side. A user-provided OpenRouter key belongs in device secure storage and should be sent only with the label-analysis request; never put it in AsyncStorage, the Expo bundle, or server logs. A local model endpoint may need to be reached directly from the Android device on the user's LAN.
+There is no project-owned server or project API key. Both providers are called straight from the phone through the same OpenAI-compatible chat-completions request: OpenRouter with the user's own key, or a local endpoint (e.g. Ollama on the LAN). The user's OpenRouter key lives only in device secure storage (expo-secure-store) and is sent only to OpenRouter; never put it in AsyncStorage, the JS bundle, logs, or CI variables.
 
-**Why:** This preserves the project's hosted fallback while supporting user-owned credentials without leaving them in ordinary app settings or build output; a hosted server also cannot reach a model running on the user's phone or home network.
+**Why:** The Replit-hosted API server was dropped (no hosting target), and a hosted server could not reach a model on the user's LAN anyway. A project-owned key in a public repo's backend would be an abuse target.
 
-**How to apply:** The optional request key may override the server fallback for that request only. Keep local endpoint settings on-device and call local OpenAI-compatible models directly.
+**How to apply:** New AI providers should plug into the provider selection in `readLabelPhoto`/`chatTarget` (`app/index.tsx`) rather than reintroducing a proxy server. A future self-hosted backend (see `docs/evershelf.md`) is configured by the user (URL + token in Settings/SecureStore), not baked into the build. The removed server and OpenAPI codegen pipeline are recoverable from git commit `8054286`.

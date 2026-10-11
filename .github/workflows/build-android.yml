@@ -29,9 +29,6 @@ jobs:
     permissions:
       contents: write
     env:
-      # Hosted label-recognition endpoint, inlined into the JS bundle at build
-      # time. Set it as a repository variable; local-model mode works without it.
-      EXPO_PUBLIC_DOMAIN: ${{ vars.EXPO_PUBLIC_DOMAIN }}
       # Route NDK C/C++ compilation of native modules through ccache.
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache

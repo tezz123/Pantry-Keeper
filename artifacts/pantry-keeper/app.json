@@ -34,7 +34,8 @@
       "expo-router",
       "expo-camera",
       "expo-notifications",
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/withCleartextTraffic"
     ],
     "experiments": {
       "typedRoutes": true,

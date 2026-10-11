@@ -62,75 +62,96 @@ function labelPrompt(kind: LabelKind) {
     : 'Read the best-before or expiry date from this pantry label. Convert it to YYYY-MM-DD. If only month and year are visible, use the last day of that month. Do not invent a date.';
 }
 
+const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.8-flash';
+
+type ChatTarget = {
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  label: string;
+  extraHeaders?: Record<string, string>;
+};
+
+function chatTarget(settings: PantrySettings, openRouterApiKey: string): ChatTarget {
+  if (settings.aiProvider === 'local') {
+    const configuredUrl = settings.localBaseUrl.trim().replace(/\/+$/, '');
+    if (!configuredUrl) throw new Error('Add a local AI URL in Settings first.');
+    return {
+      endpoint: configuredUrl.endsWith('/chat/completions')
+        ? configuredUrl
+        : `${configuredUrl}/chat/completions`,
+      apiKey: settings.localApiKey.trim(),
+      model: settings.localModel.trim(),
+      label: 'The local AI',
+    };
+  }
+  const apiKey = openRouterApiKey.trim();
+  if (!apiKey) throw new Error('Add your OpenRouter API key in Settings first.');
+  return {
+    endpoint: OPENROUTER_CHAT_URL,
+    apiKey,
+    model: settings.openRouterModel.trim() || DEFAULT_OPENROUTER_MODEL,
+    label: 'OpenRouter',
+    extraHeaders: { 'X-Title': 'Pantry Keeper' },
+  };
+}
+
 async function readLabelPhoto(
   uri: string,
   kind: LabelKind,
   settings: PantrySettings,
   openRouterApiKey: string,
 ): Promise<LabelReadResult> {
+  const target = chatTarget(settings, openRouterApiKey);
   const file = new File(uri);
   const imageData = `data:image/jpeg;base64,${await file.base64()}`;
-  const prompt = `${labelPrompt(kind)} Return only valid JSON with the keys "name", "expiryDate", and "confidence". Use an empty string when a field cannot be read.`;
+  const prompt = `${labelPrompt(kind)} Return JSON only.`;
 
-  if (settings.aiProvider === 'local') {
-    const configuredUrl = settings.localBaseUrl.trim().replace(/\/+$/, '');
-    if (!configuredUrl) throw new Error('Add a local AI URL in Settings first.');
-    const endpoint = configuredUrl.endsWith('/chat/completions')
-      ? configuredUrl
-      : `${configuredUrl}/chat/completions`;
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(settings.localApiKey.trim()
-          ? { Authorization: `Bearer ${settings.localApiKey.trim()}` }
-          : {}),
-      },
-      body: JSON.stringify({
-        model: settings.localModel.trim(),
-        max_tokens: 8192,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You read food labels. Return only valid JSON with name, expiryDate, and confidence.',
-          },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: imageData } },
-            ],
-          },
-        ],
-      }),
-    });
-    if (!response.ok) throw new Error('The local AI endpoint returned an error.');
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string | null } }>;
-    };
-    const content = payload.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') throw new Error('The local AI returned no text.');
-    return parseLabelResult(content);
-  }
-
-  const domain = process.env.EXPO_PUBLIC_DOMAIN;
-  if (!domain) throw new Error('The hosted AI endpoint is not configured.');
-  const response = await fetch(`https://${domain}/api/ai/analyze-label`, {
+  const response = await fetch(target.endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(target.apiKey ? { Authorization: `Bearer ${target.apiKey}` } : {}),
+      ...target.extraHeaders,
+    },
     body: JSON.stringify({
-      kind,
-      model: settings.openRouterModel.trim(),
-      openRouterApiKey: openRouterApiKey.trim() || undefined,
-      imageData,
+      model: target.model,
+      max_tokens: 8192,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You read food labels. Return only valid JSON with the keys "name", "expiryDate", and "confidence". Use an empty string when a field cannot be read.',
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: imageData } },
+          ],
+        },
+      ],
     }),
   });
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? 'OpenRouter could not read this label.');
+    const errorPayload = (await response.json().catch(() => null)) as {
+      error?: { message?: string } | string;
+    } | null;
+    const detail =
+      typeof errorPayload?.error === 'string' ? errorPayload.error : errorPayload?.error?.message;
+    throw new Error(
+      detail
+        ? `${target.label} error (${response.status}): ${detail}`
+        : `${target.label} returned an error (${response.status}).`,
+    );
   }
-  return (await response.json()) as LabelReadResult;
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string | null } }>;
+  };
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content !== 'string') throw new Error(`${target.label} returned no text.`);
+  return parseLabelResult(content);
 }
 
 function daysUntil(dateString: string) {
@@ -1059,7 +1080,7 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
           <Text style={[styles.modalEyebrow, { color: colors.green }]}>LABEL READING</Text>
           <Text style={[styles.modalHeading, { color: colors.forest }]}>Choose your AI</Text>
           <Text style={[styles.modalDescription, { color: colors.mutedForeground }]}>
-            OpenRouter is hosted and private to this project. Local AI keeps photos on your network and works with an OpenAI-compatible endpoint.
+            OpenRouter sends photos from this phone to the model you choose, using your own API key. Local AI keeps photos on your network and works with an OpenAI-compatible endpoint.
           </Text>
           <View style={styles.providerRow}>
             {[
@@ -1105,7 +1126,7 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
                 style={[styles.textInput, { backgroundColor: colors.card, borderColor: colors.input, color: colors.forest }]}
               />
               <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
-                The hosted default uses Google Gemini through OpenRouter, not xAI.
+                Any OpenRouter model with image input works. The default is Google Gemini.
               </Text>
               <Text style={[styles.inputLabel, { color: colors.forest }]}>Your OpenRouter API key</Text>
               <TextInput
@@ -1121,7 +1142,7 @@ function SettingsModal({ visible, onClose }: { visible: boolean; onClose: () => 
                 returnKeyType="done"
               />
               <Text style={[styles.settingsHint, { color: colors.mutedForeground }]}>
-                Stored securely on this device. Sent to Pantry Keeper’s API only when you scan a label.
+                Required. Stored securely on this device and sent only to OpenRouter when you scan a label.
               </Text>
               <View style={styles.apiKeyActions}>
                 <Pressable

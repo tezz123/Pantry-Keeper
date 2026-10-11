@@ -1,39 +1,31 @@
 # AGENTS.md
 
-Pantry Keeper: an Android (Expo / React Native) pantry tracker. Users photograph product labels and expiry dates, an AI vision model extracts name + date, items are grouped by named shelves, and local notifications fire N days before expiry. Originally scaffolded on Replit; all Replit files/deps have been removed and APKs are built by GitHub Actions. The API server currently has no deployment target.
+Pantry Keeper: an Android (Expo / React Native) pantry tracker. Users photograph product labels and expiry dates, an AI vision model extracts name + date, items are grouped by named shelves, and local notifications fire N days before expiry. Originally scaffolded on Replit; all Replit files/deps have been removed and APKs are built by GitHub Actions.
 
 ## Repo layout (pnpm workspace)
 
-| Path | Package | Role |
-|---|---|---|
-| `artifacts/pantry-keeper` | `@workspace/pantry-keeper` | The Expo app (the actual product) |
-| `artifacts/api-server` | `@workspace/api-server` | Express 5 API, only real route: `POST /api/ai/analyze-label` (OpenRouter proxy) |
-| `lib/api-spec` | `@workspace/api-spec` | `openapi.yaml`, the source of truth for API contracts; Orval config |
-| `lib/api-zod` | `@workspace/api-zod` | **Generated** Zod schemas (used by api-server for validation) |
-| `lib/api-client-react` | `@workspace/api-client-react` | **Generated** React Query hooks (a dependency of the app, but the app doesn't use them yet; it calls `fetch` directly) |
-| `lib/db` | `@workspace/db` | Drizzle + Postgres scaffold. Schema is empty and nothing imports it |
-| `scripts` | `@workspace/scripts` | Placeholder (`hello.ts`) |
-| `.agents/memory/` | | Persistent agent memory; read `MEMORY.md` index (see Policies below) |
-| `attached_assets/` | | Pasted error logs from past debugging sessions (context only) |
-| `bin/act` | | Untracked local binary (nektos/act) for running GH workflows locally |
+| Path | Role |
+|---|---|
+| `artifacts/pantry-keeper` | The Expo app `@workspace/pantry-keeper` (the only workspace package; the `artifacts/` name is left over from Replit) |
+| `docs/evershelf.md` | Notes on a possible future [EverShelf](https://github.com/dadaloop82/EverShelf) integration |
+| `.agents/memory/` | Persistent agent memory; read the `MEMORY.md` index (see Policies below) |
+| `attached_assets/` | Gitignored, local-only pasted error logs |
 
 ## Commands
 
-Use **pnpm 10** only (pinned via `packageManager` in root `package.json`; settings like `minimumReleaseAge`/`overrides` in `pnpm-workspace.yaml` are ignored by pnpm 9, which breaks `--frozen-lockfile`). The root `preinstall` script rejects npm/yarn. pnpm may not be on PATH here; `npx -y pnpm@10.34.6 <cmd>` works.
+Use **pnpm 10** only (pinned via `packageManager` in root `package.json`; settings like `minimumReleaseAge` in `pnpm-workspace.yaml` are ignored by pnpm 9, which breaks `--frozen-lockfile`). The root `preinstall` script rejects npm/yarn. pnpm may not be on PATH here; `npx -y pnpm@10.34.6 <cmd>` works.
 
 ```sh
 pnpm install
-pnpm run typecheck                 # tsc --build for lib/* refs, then each artifact/scripts typecheck
-pnpm run build                     # typecheck + every package's build
-pnpm --filter @workspace/api-spec run codegen   # regenerate lib/api-zod + lib/api-client-react from openapi.yaml, then typecheck libs
-pnpm --filter @workspace/pantry-keeper run typecheck
+pnpm run typecheck                                           # = the app's tsc --noEmit
 pnpm --filter @workspace/pantry-keeper run dev               # expo start
 pnpm --filter @workspace/pantry-keeper run prebuild:android  # generate android/ (gitignored)
-pnpm --filter @workspace/api-server run dev     # builds with esbuild then runs dist/index.mjs; PORT env REQUIRED (throws otherwise)
+pnpm --filter @workspace/pantry-keeper run android           # expo run:android (needs a local Android SDK + JDK 17)
 ```
 
-- There are **no tests, linter, or formatter scripts** (only `prettier` is installed as a dependency). Use typecheck to verify changes.
-- `pnpm --filter @workspace/db run push` needs `DATABASE_URL` (the DB is unused so far).
+- There are **no tests, linter, or formatter scripts** (only `prettier` is installed). Use typecheck to verify changes.
+- `expo prebuild` can rewrite `package.json` (it once copied `expo`/`react`/`react-native` into `dependencies` while leaving duplicates in `devDependencies`). Check `git diff` after running it.
+- Local Gradle builds need a full **JDK 17** (a JRE fails with "does not provide the required capabilities: [JAVA_COMPILER]"). The `eclipse-temurin:17-jdk` Docker image works if the host has no JDK.
 
 ## Android APK build (CI)
 
@@ -51,7 +43,7 @@ How the build works and what keeps it fast (the first version timed out after 55
 
 Gotchas:
 - Bump `android.versionCode` in `app.json` for each release.
-- `EXPO_PUBLIC_DOMAIN` is inlined at bundle time from the repo **variable** `vars.EXPO_PUBLIC_DOMAIN`. If it's unset, hosted OpenRouter mode fails with "The hosted AI endpoint is not configured", and only the "local" AI provider works.
+- Release builds block plain-HTTP requests by default. The local config plugin `plugins/withCleartextTraffic.js` (listed in `app.json`) re-enables them so LAN AI servers work. Keep it.
 - `eas.json` exists but EAS is not used by CI.
 
 ## App architecture (`artifacts/pantry-keeper`)
@@ -59,35 +51,20 @@ Gotchas:
 - expo-router with `app/_layout.tsx` (providers: SafeArea, ErrorBoundary, React Query, GestureHandler, KeyboardProvider; fonts gate the splash screen). `app/index.tsx` (~1450 lines) holds **the entire UI**: `HomeScreen`, `AddItemModal`, `CameraModal`, `SettingsModal`, `MoveItemModal`, plus one `StyleSheet.create` at the bottom. Modals are `<Modal>` components, not routes.
 - `state/PantryContext.tsx` holds all state: `PantryProvider` / `usePantry()`. The provider wraps the screen inside `app/index.tsx`, not `_layout`.
   - Items + settings persist to AsyncStorage (`@pantry-keeper/items`, `@pantry-keeper/settings`). Writes happen only after `isHydrated`. Stored settings are merged over `DEFAULT_SETTINGS`, so new setting fields need a default there.
-  - The user's OpenRouter key lives **only** in `expo-secure-store`, never in settings/AsyncStorage.
+  - The user's OpenRouter key lives **only** in `expo-secure-store`, never in settings/AsyncStorage. SecureStore keys must match `^[\w.-]+$`, so the `@pantry-keeper/...` style used for AsyncStorage keys throws there.
   - Reminders: every reschedule calls `cancelAllScheduledNotificationsAsync()` and then reschedules all items (DATE trigger at 09:00, `reminderDays` before expiry). Skipped on web.
-- **expo-notifications is imported by deep `expo-notifications/build/...` paths on purpose.** Importing the package root loads the push-token auto-registration module, which throws in Expo Go on Android SDK 53+ (see `attached_assets/*Push*`). Keep the deep imports.
-- Label reading (`readLabelPhoto` in `app/index.tsx`): the photo is turned into a base64 data URL via `expo-file-system` `File`.
-  - `aiProvider: 'local'` sends a POST straight from the device to `${localBaseUrl}/chat/completions` (OpenAI-compatible, e.g. Ollama).
-  - `aiProvider: 'openrouter'` sends a POST to `https://${EXPO_PUBLIC_DOMAIN}/api/ai/analyze-label`, and the server calls OpenRouter.
-  - Both paths share the same prompt text and the same JSON-extraction logic. These are **duplicated** in the app and in `api-server/src/routes/ai.ts`, so change both together. Default model `google/gemini-3.8-flash` also appears in 3 places (app defaults, server, openapi.yaml).
+- **expo-notifications is imported by deep `expo-notifications/build/...` paths on purpose.** Importing the package root loads the push-token auto-registration module, which throws in Expo Go on Android SDK 53+ ("Android Push notifications ... was removed from Expo Go with the release of SDK 53"). Keep the deep imports.
+- Label reading (`readLabelPhoto` + `chatTarget` in `app/index.tsx`): the photo is turned into a base64 data URL via `expo-file-system` `File`. Both providers then get the **same OpenAI-compatible chat-completions request** straight from the device. There is no backend.
+  - `aiProvider: 'openrouter'` posts to `https://openrouter.ai/api/v1/chat/completions` with the user's key (required). The default model `google/gemini-3.8-flash` is in `DEFAULT_SETTINGS` and `DEFAULT_OPENROUTER_MODEL`.
+  - `aiProvider: 'local'` posts to `${localBaseUrl}/chat/completions` (e.g. Ollama), with an optional bearer key.
+  - Add a new provider by extending `chatTarget`. A non-chat provider such as EverShelf needs a branch in `readLabelPhoto`; see `docs/evershelf.md`.
+- The app pins `react`/`react-dom` 19.2.3 directly (not via the pnpm catalog) to match Expo SDK 57.
 - Theming: use `useColors()` (`hooks/useColors.ts`) + `constants/colors.ts`. Only a light palette is defined. The `@/*` path alias maps to the app root.
-- `app.json` enables `typedRoutes` and `reactCompiler`. `metro.config.js` watches the monorepo root so `workspace:*` libs resolve.
-
-## API server (`artifacts/api-server`)
-
-- Mounted under `/api`. JSON body limit is `12mb` because of base64 images. Logs through pino-http with serializers that strip query strings; never log request bodies or keys.
-- Key precedence: `openRouterApiKey` from the request body, then `process.env.OPENROUTER_API_KEY`. With neither, the route returns 503.
-- Bundled with esbuild (`build.mjs`) into ESM `dist/index.mjs`, with a require/__dirname banner. If a new dependency has native or dynamically loaded parts, add it to the `external` list.
-- Validate requests with schemas from `@workspace/api-zod` (generated). To add an endpoint: edit `lib/api-spec/openapi.yaml`, run codegen, then add a router in `src/routes/` and register it in `src/routes/index.ts`.
-
-## Codegen / TS gotchas
-
-- Don't change `info.title: Api` in `openapi.yaml`. Generated file names (`api.ts`) and the index re-exports depend on it.
-- Orval zod output is pinned to **Zod 3** syntax (the catalog installs zod 3). The commented example in `lib/db/src/schema/index.ts` that uses `zod/v4` is scaffold text.
-- Never hand-edit `lib/*/src/generated/**`. `clean: true` wipes it on each codegen run.
-- `lib/api-zod/src/index.ts` re-exports selected types by hand. You may need to update it after codegen if names collide.
-- Root `tsconfig.json` references only `lib/*` (composite). Artifacts typecheck on their own with `--noEmit`. The base config has `customConditions: ["workspace"]` and `strictFunctionTypes: false`.
-- The app pins `react`/`react-dom` 19.2.3 directly (not via the catalog) to match Expo SDK 57.
+- `app.json` enables `typedRoutes` and `reactCompiler`. `metro.config.js` watches the workspace root because pnpm keeps packages in the root `node_modules`.
 
 ## Policies (from `.agents/memory/`; keep these)
 
 - **Expo SDK**: stay on stable SDK 57 until SDK 58 is GA. Don't use previews.
 - **Never weaken `minimumReleaseAge: 1440`** (supply-chain guard) or add exclusions just to get a fresh patch. Retry the install after the waiting period.
-- **AI credentials**: the project's OpenRouter key stays server-side. The user's key stays in SecureStore and is sent only with the analyze request. Local model endpoints are called directly from the device, because the hosted server can't reach a user's LAN.
+- **AI credentials / no backend**: there is no project server or project API key. The user's OpenRouter key stays in SecureStore and is sent only to OpenRouter. Don't reintroduce a proxy server. The removed API server + OpenAPI/Orval codegen can be restored from commit `8054286` if needed.
 - Add new durable decisions as files in `.agents/memory/` and index them in `MEMORY.md`.

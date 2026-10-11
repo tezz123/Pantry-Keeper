@@ -1,2 +1,3 @@
-- [AI provider routing](ai-provider-routing.md) — keep project credentials server-side, user keys in secure device storage, and local model calls on-device.
+- [AI provider routing](ai-provider-routing.md) — no backend; OpenRouter (user key in SecureStore) and local models are called directly from the device.
 - [Expo SDK stability](expo-sdk-stability.md) — Keep Pantry Keeper on stable SDK 57 until SDK 58 is stable; do not bypass registry release-age checks for fresh patches.
+- [EverShelf integration](../../docs/evershelf.md) — possible future backend/AI provider; read before adding sync or a server-side provider.
